@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import type { Receipt, Trip } from './types/receipt';
 import { DEFAULT_EXCHANGE_RATE } from './utils/currency';
-import { INITIAL_SAMPLE_RECEIPTS } from './utils/ocrParser';
 import { loadTrips, saveTrips } from './utils/dbStorage';
 import { HeaderNav } from './components/HeaderNav';
 import { ReceiptList } from './components/ReceiptList';
@@ -47,7 +46,7 @@ export function App() {
             id: `trip-${Date.now()}`,
             name: '我的日本之旅',
             createdAt: Date.now(),
-            receipts: [...INITIAL_SAMPLE_RECEIPTS]
+            receipts: []
           };
           finalTrips = [defaultTrip];
         }
