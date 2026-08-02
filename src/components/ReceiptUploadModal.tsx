@@ -123,7 +123,10 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
     onClose();
   };
 
-  // Image compressor for scan mode
+  const [statusMessage, setStatusMessage] = useState<string>('');
+  const shouldCancelRef = React.useRef(false);
+
+  // Image compressor for scan mode (Max 600px, 0.5 quality for lightning-fast mobile upload)
   const compressImageToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -131,8 +134,8 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
         const img = new Image();
         img.onload = () => {
           const canvas = document.createElement('canvas');
-          const MAX_WIDTH = 800;
-          const MAX_HEIGHT = 800;
+          const MAX_WIDTH = 600;
+          const MAX_HEIGHT = 600;
           let width = img.width;
           let height = img.height;
 
@@ -156,7 +159,7 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
             return;
           }
           ctx.drawImage(img, 0, 0, width, height);
-          resolve(canvas.toDataURL('image/jpeg', 0.6)); 
+          resolve(canvas.toDataURL('image/jpeg', 0.5)); 
         };
         img.onerror = () => reject(new Error('圖片讀取失敗'));
         img.src = e.target?.result as string;
@@ -171,21 +174,26 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
       const files = Array.from(e.target.files);
       setIsScanning(true);
       setFailedErrors([]);
+      shouldCancelRef.current = false;
       setProgress({ current: 0, total: files.length });
 
       const newReceipts: Receipt[] = [];
       let hasError = false;
 
       for (let i = 0; i < files.length; i++) {
+        if (shouldCancelRef.current) break;
+
         const file = files[i];
         setProgress({ current: i + 1, total: files.length });
+        setStatusMessage(`正在辨識第 ${i + 1} / ${files.length} 張（${file.name}）...`);
 
         if (i > 0) {
-          await new Promise(resolve => setTimeout(resolve, 1500));
+          await new Promise(resolve => setTimeout(resolve, 800));
         }
         
         try {
           const base64 = await compressImageToBase64(file);
+          if (shouldCancelRef.current) break;
           
           let result;
           try {
@@ -193,8 +201,9 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
           } catch (firstErr: any) {
             const msg = firstErr?.message || '';
             if (msg.includes('quota') || msg.includes('Quota') || msg.includes('429') || msg.includes('exceeded')) {
-              setProgress({ current: i + 1, total: files.length });
-              await new Promise(resolve => setTimeout(resolve, 5000));
+              setStatusMessage(`頻率過高，自動冷卻中 (${i + 1}/${files.length})...`);
+              await new Promise(resolve => setTimeout(resolve, 3000));
+              if (shouldCancelRef.current) break;
               result = await scanReceiptWithGemini(base64, 'image/jpeg');
             } else {
               throw firstErr;
@@ -225,8 +234,10 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
           
           let reason = '辨識失敗';
           const rawMsg = err?.message || '';
-          if (rawMsg.includes('quota') || rawMsg.includes('Quota') || rawMsg.includes('exceeded') || rawMsg.includes('429')) {
-            reason = '超過 API 額度限制（已重試仍失敗，請稍後再試）';
+          if (rawMsg.includes('超時') || rawMsg.includes('timeout')) {
+            reason = '網路連線超時';
+          } else if (rawMsg.includes('quota') || rawMsg.includes('Quota') || rawMsg.includes('exceeded') || rawMsg.includes('429')) {
+            reason = '超過 API 額度限制';
           } else if (rawMsg.includes('API Key')) {
             reason = 'API Key 設定錯誤';
           } else if (rawMsg.includes('fetch') || rawMsg.includes('network')) {
@@ -349,7 +360,7 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
               )}
 
               {isScanning ? (
-                <div className="flex flex-col items-center justify-center py-10 space-y-6 w-full text-center">
+                <div className="flex flex-col items-center justify-center py-10 space-y-5 w-full text-center">
                   <div className="relative w-20 h-20">
                     <div className="absolute inset-0 rounded-full border-4 border-emerald-100"></div>
                     <div 
@@ -361,12 +372,21 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
                     </div>
                   </div>
                   <div>
-                    <h3 className="text-lg font-bold text-gray-800 mb-2">AI 智能分析中</h3>
-                    <p className="text-sm text-gray-500 font-medium">
-                      正在擷取店家、分類與消費明細...<br/>
-                      請勿關閉視窗
+                    <h3 className="text-lg font-bold text-gray-800 mb-1">AI 智能分析中</h3>
+                    <p className="text-xs text-emerald-700 font-bold bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-200 shadow-2xs inline-block max-w-xs truncate">
+                      {statusMessage || '正在處理發票資料...'}
                     </p>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      shouldCancelRef.current = true;
+                      setIsScanning(false);
+                    }}
+                    className="px-4 py-2 bg-gray-100 hover:bg-rose-50 hover:text-rose-600 text-gray-600 text-xs font-bold rounded-xl transition-colors border border-gray-200"
+                  >
+                    中途停止 / 取消
+                  </button>
                 </div>
               ) : failedErrors.length === 0 ? (
                 <div className="w-full relative border-2 border-dashed border-emerald-200 hover:border-emerald-500 rounded-2xl p-10 text-center bg-emerald-50/40 transition-colors group cursor-pointer">
