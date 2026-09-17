@@ -54,7 +54,11 @@ const SYSTEM_PROMPT = `
 若圖片內容無法辨識清楚,總金額或店名請填 null,並在「信心程度」與「無法辨識原因」欄位說明原因,不要用其他收據的內容替代或猜測。
 `;
 
-const GEMINI_MODEL = 'gemini-2.0-flash';
+// 模型名稱可用 Vercel 環境變數 GEMINI_MODEL 覆寫，未來 Google 汰換模型時
+// 只要在後台改一個變數即可，不必動程式碼重新部署。
+// 註：2026-09-17 起 Google 對 gemini-2.0-flash 回傳 404「no longer available」，
+//     故預設改為 gemini-3.8-flash。若該模型日後恢復，設 GEMINI_MODEL 即可切回。
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const SERVER_TIMEOUT_MS = 20000; // 伺服器端 20 秒，比前端的 25 秒短，讓前端一定收得到錯誤訊息
 
 // Vercel 免費方案單次函式最長可跑 60 秒，這裡設 30 秒已綽綽有餘
