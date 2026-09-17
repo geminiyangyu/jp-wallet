@@ -55,17 +55,17 @@ const SYSTEM_PROMPT = `
 `;
 
 /**
- * 模型遞補清單（依序嘗試，第一個成功就回傳）。
+ * 模型清單（並行競速，最快回來的那個勝出，詳見下方說明）。
  *
  * 為什麼需要清單而不是單一模型——2026-09-17 實測發現兩種故障：
  *   1. gemini-2.0-flash 回傳 404「no longer available」，Google 已停止提供
  *   2. gemini-3.8-flash（9/2 才發布）頻繁回傳 503「experiencing high demand」，
  *      實測 5 次只成功 2 次，批次掃描會一直失敗
- * 單押任何一個模型都不可靠，因此改為自動遞補：
- * 遇到 404（模型消失）、503/500（過載）、429（限頻）就換下一個，使用者無感。
+ * 單押任何一個模型都不可靠，所以同時問多個，誰活著誰回答。
  *
- * 可用 Vercel 環境變數 GEMINI_MODEL 覆寫（逗號分隔，依優先順序）。
- * 例：GEMINI_MODEL=gemini-3.8-flash,gemini-3.6-flash
+ * 可用 Vercel 環境變數 GEMINI_MODEL 覆寫（逗號分隔）。
+ * 只填一個就等於退回單發模式，不會並行。
+ * 例：GEMINI_MODEL=gemini-3.6-flash
  */
 const MODEL_CHAIN: string[] = (
   process.env.GEMINI_MODEL || 'gemini-3.6-flash,gemini-3.8-flash,gemini-3.5-flash'
@@ -74,40 +74,64 @@ const MODEL_CHAIN: string[] = (
   .map((s) => s.trim())
   .filter(Boolean);
 
-// 總預算 18 秒，比前端的 25 秒短，確保前端一定收得到伺服器的錯誤訊息而非自己逾時
-// 時間預算依 2026-09-17 實測數據調整：
-//   成功的辨識耗時 5.4～9.0 秒，原本單次 12 秒上限太緊——第一個模型一旦卡住，
-//   剩餘預算只夠 6 秒，第二個模型等於沒機會，結果全部落到逾時。
-//   改為單次 16 秒（涵蓋實測最慢值再加一倍餘裕），總預算 34 秒可容納兩次完整嘗試。
+/**
+ * 【為什麼改成並行競速】
+ *
+ * 舊版是「一個一個試」，總耗時是各次的「總和」：
+ *   gemini-3.6 失敗 2s → gemini-3.8 失敗 2s → gemini-3.5 跑 30s ＝ 共 34 秒
+ * 實測最慢到 34.7 秒，使用者等到不耐煩，前端也容易逾時。
+ *
+ * 現在改成同時發送給清單上所有模型，誰先回來就用誰，其餘立刻中止。
+ * 總耗時從「總和」變成「最快的那一個」：上例變成 30 秒，而當 3.6 順利時只要 6～13 秒。
+ *
+ * 額外的 API 用量其實很有限——排前面的模型多半在 1～2 秒內就 503 失敗，
+ * 真正同時「成功」的情況很少見。若日後擔心配額，把 GEMINI_MODEL 設成單一模型
+ * 即可退回單發模式（清單只有一個時就沒有並行）。
+ */
 const TOTAL_BUDGET_MS = 50000; // 比前端的 56 秒短，確保前端一定收得到伺服器訊息
-const PER_ATTEMPT_MS = 20000; // 非最後一個模型的單次上限；最後一個不受此限（見下方迴圈）
-const MIN_ATTEMPT_MS = 6000; // 剩餘不足 6 秒就不再嘗試下一個，避免註定失敗的空轉
 
-// 這些狀態碼代表「這個模型現在不能用」，換下一個還有機會成功。
-// 其他錯誤（400 圖片格式錯誤、403 金鑰無效）換模型也沒用，直接回報。
-const RETRYABLE = new Set([404, 429, 500, 502, 503, 504]);
+type ScanWin = { text: string; model: string; ms: number };
 
-async function callGemini(
+/**
+ * 對單一模型發出請求。成功回傳辨識文字，失敗一律 throw（讓 Promise.any 去挑成功的那個）。
+ * signal 由外部統一控制，這樣一有人成功就能立刻中止其他還在跑的請求。
+ */
+async function askModel(
   model: string,
   apiKey: string,
   requestBody: unknown,
-  timeoutMs: number
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
-      }
-    );
-  } finally {
-    clearTimeout(timeoutId);
+  signal: AbortSignal,
+  startedAt: number
+): Promise<ScanWin> {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+      signal,
+    }
+  );
+
+  if (!response.ok) {
+    const errorData: any = await response.json().catch(() => ({}));
+    const err: any = new Error(errorData?.error?.message || response.statusText);
+    err.status = response.status;
+    err.model = model;
+    throw err;
   }
+
+  const data: any = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!text) {
+    const err: any = new Error(`模型 ${model} 未回傳內容`);
+    err.status = 502;
+    err.model = model;
+    throw err;
+  }
+
+  return { text, model, ms: Date.now() - startedAt };
 }
 
 // Vercel 免費方案單次函式最長可跑 60 秒；需大於 TOTAL_BUDGET_MS 才不會被平台中途砍斷
@@ -172,63 +196,47 @@ export default async function handler(req: any, res: any) {
   };
 
   const startedAt = Date.now();
-  const tried: string[] = [];
-  let lastStatus = 500;
-  let lastError = '未知錯誤';
 
-  for (let i = 0; i < MODEL_CHAIN.length; i++) {
-    const model = MODEL_CHAIN[i];
-    const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
-    if (remaining < MIN_ATTEMPT_MS) break; // 時間不夠了，別讓前端等到自己逾時
+  // 同時發給清單上所有模型，誰先成功就用誰，其餘立刻中止
+  const controller = new AbortController();
+  const budgetTimer = setTimeout(() => controller.abort(), TOTAL_BUDGET_MS);
 
-    tried.push(model);
+  const attempts = MODEL_CHAIN.map((model) =>
+    askModel(model, apiKey, requestBody, controller.signal, startedAt)
+  );
 
-    // 最後一個模型給它「所有剩下的時間」，不再套用單次上限。
-    // 原因（2026-09-17 實測）：排前面的模型多半在 1~2 秒內就 503 失敗，
-    // 真正在幹活的是最後那個。長收據（19 品項、51KB）需要超過 16 秒，
-    // 若對它也套用單次上限，等於自己把唯一能成功的那次掐死。
-    const isLast = i === MODEL_CHAIN.length - 1;
-    const attemptMs = isLast ? remaining : Math.min(remaining, PER_ATTEMPT_MS);
+  try {
+    const winner = await Promise.any(attempts);
+    clearTimeout(budgetTimer);
+    controller.abort(); // 中止其他還在跑的請求，不浪費配額
 
-    try {
-      const response = await callGemini(model, apiKey, requestBody, attemptMs);
+    // 只回傳 AI 產生的 JSON 字串，所有欄位對應與和曆換算仍由前端處理。
+    // model／ms 方便除錯：看得出是哪個模型贏、花了多久。
+    res.status(200).json({ text: winner.text, model: winner.model, ms: winner.ms, tried: MODEL_CHAIN });
+    return;
+  } catch (aggregate: any) {
+    clearTimeout(budgetTimer);
+    controller.abort();
 
-      if (response.ok) {
-        const data: any = await response.json();
-        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    // Promise.any 全數失敗時給的是 AggregateError，把每個模型的原因整理出來
+    const errors: any[] = aggregate?.errors || [aggregate];
+    const details = errors.map((e: any) => `${e?.model || '?'}: ${e?.message || e?.name || '未知'}`);
 
-        if (!text) {
-          lastStatus = 502;
-          lastError = `模型 ${model} 未回傳內容`;
-          continue; // 換下一個模型試試
-        }
+    // 若有「換模型也沒用」的錯誤（金鑰無效、圖片格式錯），優先用它的狀態碼回報
+    const hard = errors.find((e: any) => e?.status && ![404, 429, 500, 502, 503, 504].includes(e.status));
+    const aborted = errors.some((e: any) => e?.name === 'AbortError');
 
-        // 只回傳 AI 產生的 JSON 字串，所有欄位對應與和曆換算仍由前端處理。
-        // 一併回傳 model 方便日後除錯：可以知道實際是哪個模型辨識的。
-        res.status(200).json({ text, model, tried });
-        return;
-      }
+    const status = hard?.status || (aborted ? 504 : errors[0]?.status || 500);
+    const message = hard
+      ? hard.message
+      : aborted
+        ? `所有模型都在 ${TOTAL_BUDGET_MS / 1000} 秒內沒有回應`
+        : details.join('；');
 
-      const errorData: any = await response.json().catch(() => ({}));
-      lastStatus = response.status;
-      lastError = errorData?.error?.message || response.statusText;
-
-      // 不是「換個模型就可能好」的錯誤，繼續試也是浪費時間，直接回報
-      if (!RETRYABLE.has(response.status)) break;
-    } catch (err: any) {
-      if (err?.name === 'AbortError') {
-        lastStatus = 504;
-        lastError = `模型 ${model} 回應逾時`;
-        continue; // 這個模型太慢，換下一個
-      }
-      lastStatus = 500;
-      lastError = err?.message || '伺服器端發生未預期錯誤';
-      break; // 網路層錯誤，換模型無濟於事
-    }
+    res.status(status).json({
+      error: `Gemini API 錯誤: ${message}`,
+      tried: MODEL_CHAIN,
+      details,
+    });
   }
-
-  res.status(lastStatus).json({
-    error: `Gemini API 錯誤: ${lastError}`,
-    tried, // 讓前端／除錯時看得出試過哪些模型
-  });
 }
