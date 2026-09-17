@@ -75,9 +75,13 @@ const MODEL_CHAIN: string[] = (
   .filter(Boolean);
 
 // 總預算 18 秒，比前端的 25 秒短，確保前端一定收得到伺服器的錯誤訊息而非自己逾時
-const TOTAL_BUDGET_MS = 18000;
-const PER_ATTEMPT_MS = 12000; // 單一模型最多等 12 秒
-const MIN_ATTEMPT_MS = 4000; // 剩餘時間不足 4 秒就不再嘗試下一個模型
+// 時間預算依 2026-09-17 實測數據調整：
+//   成功的辨識耗時 5.4～9.0 秒，原本單次 12 秒上限太緊——第一個模型一旦卡住，
+//   剩餘預算只夠 6 秒，第二個模型等於沒機會，結果全部落到逾時。
+//   改為單次 16 秒（涵蓋實測最慢值再加一倍餘裕），總預算 34 秒可容納兩次完整嘗試。
+const TOTAL_BUDGET_MS = 34000; // 比前端的 40 秒短，確保前端一定收得到伺服器訊息
+const PER_ATTEMPT_MS = 16000; // 單一模型最多等 16 秒
+const MIN_ATTEMPT_MS = 6000; // 剩餘不足 6 秒就不再嘗試下一個，避免註定失敗的空轉
 
 // 這些狀態碼代表「這個模型現在不能用」，換下一個還有機會成功。
 // 其他錯誤（400 圖片格式錯誤、403 金鑰無效）換模型也沒用，直接回報。
@@ -106,9 +110,9 @@ async function callGemini(
   }
 }
 
-// Vercel 免費方案單次函式最長可跑 60 秒，這裡設 30 秒已綽綽有餘
+// Vercel 免費方案單次函式最長可跑 60 秒；需大於 TOTAL_BUDGET_MS 才不會被平台中途砍斷
 export const config = {
-  maxDuration: 30,
+  maxDuration: 60,
 };
 
 export default async function handler(req: any, res: any) {
