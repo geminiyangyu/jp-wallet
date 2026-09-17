@@ -135,7 +135,7 @@ export interface Trip {
 - 專案根目錄配有 `vercel.json`，已寫好 SPA 路由重定向。
 - `package.json` 中已移除 Mac 專用 Linux 相斥封包 (`@rolldown/binding-darwin-x64`)，可直接在 Vercel 平台上 100% 成功建置。
 - **環境變數設定**: 於 Vercel 後台將 `VITE_GEMINI_API_KEY` 設為個人的 Gemini API Key 即可。
-- **線上展示網址**: `https://jp-wallet-phau.vercel.app`
+- **線上展示網址**: `https://jp-wallet.vercel.app`
 
 ### 5.2 PWA 設定 (iPhone 新增至主畫面)
 - `index.html` 內含 `apple-mobile-web-app-capable: yes` 與 `viewport-fit=cover`。

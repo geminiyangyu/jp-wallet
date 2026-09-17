@@ -3,7 +3,7 @@
 專為赴日旅遊打造的智慧記帳錢包，支援 AI 發票相片辨識 (Gemini 2.0)、無發票手動記帳、日圓台幣即時換算與天數分類分析。
 
 ## 🌐 正式發布網址 (Vercel Live URL)
-- **正式網址**: [https://jp-wallet-phau.vercel.app](https://jp-wallet-phau.vercel.app)
+- **正式網址**: [https://jp-wallet.vercel.app](https://jp-wallet.vercel.app)
 - **iOS PWA 安裝**: 於 iPhone Safari 打開上述網址，點擊「分享 ➔ 新增至主畫面」即可全螢幕獨立使用。
 
 ## 🔑 核心功能
