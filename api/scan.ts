@@ -79,8 +79,8 @@ const MODEL_CHAIN: string[] = (
 //   成功的辨識耗時 5.4～9.0 秒，原本單次 12 秒上限太緊——第一個模型一旦卡住，
 //   剩餘預算只夠 6 秒，第二個模型等於沒機會，結果全部落到逾時。
 //   改為單次 16 秒（涵蓋實測最慢值再加一倍餘裕），總預算 34 秒可容納兩次完整嘗試。
-const TOTAL_BUDGET_MS = 34000; // 比前端的 40 秒短，確保前端一定收得到伺服器訊息
-const PER_ATTEMPT_MS = 16000; // 單一模型最多等 16 秒
+const TOTAL_BUDGET_MS = 50000; // 比前端的 56 秒短，確保前端一定收得到伺服器訊息
+const PER_ATTEMPT_MS = 20000; // 非最後一個模型的單次上限；最後一個不受此限（見下方迴圈）
 const MIN_ATTEMPT_MS = 6000; // 剩餘不足 6 秒就不再嘗試下一個，避免註定失敗的空轉
 
 // 這些狀態碼代表「這個模型現在不能用」，換下一個還有機會成功。
@@ -176,19 +176,22 @@ export default async function handler(req: any, res: any) {
   let lastStatus = 500;
   let lastError = '未知錯誤';
 
-  for (const model of MODEL_CHAIN) {
+  for (let i = 0; i < MODEL_CHAIN.length; i++) {
+    const model = MODEL_CHAIN[i];
     const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
     if (remaining < MIN_ATTEMPT_MS) break; // 時間不夠了，別讓前端等到自己逾時
 
     tried.push(model);
 
+    // 最後一個模型給它「所有剩下的時間」，不再套用單次上限。
+    // 原因（2026-09-17 實測）：排前面的模型多半在 1~2 秒內就 503 失敗，
+    // 真正在幹活的是最後那個。長收據（19 品項、51KB）需要超過 16 秒，
+    // 若對它也套用單次上限，等於自己把唯一能成功的那次掐死。
+    const isLast = i === MODEL_CHAIN.length - 1;
+    const attemptMs = isLast ? remaining : Math.min(remaining, PER_ATTEMPT_MS);
+
     try {
-      const response = await callGemini(
-        model,
-        apiKey,
-        requestBody,
-        Math.min(remaining, PER_ATTEMPT_MS)
-      );
+      const response = await callGemini(model, apiKey, requestBody, attemptMs);
 
       if (response.ok) {
         const data: any = await response.json();

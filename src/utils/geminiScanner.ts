@@ -13,9 +13,9 @@ import type { Receipt, CategoryType, ReceiptItem } from '../types/receipt';
  * 金鑰永遠不會出現在瀏覽器裡，SYSTEM_PROMPT 也一併移到 api/scan.ts。
  */
 
-// 伺服器端最多花 34 秒（會依序嘗試多個 Gemini 模型），這裡留 6 秒餘裕。
+// 伺服器端最多花 50 秒（會依序嘗試多個 Gemini 模型），這裡留 6 秒餘裕。
 // 寧可多等幾秒拿到結果，也不要在伺服器還在努力時就自己放棄。
-const CLIENT_TIMEOUT_MS = 40000;
+const CLIENT_TIMEOUT_MS = 56000;
 
 function normalizeJapaneseReceiptDate(rawDateStr: string | undefined): string {
   if (!rawDateStr) return '';
@@ -70,7 +70,7 @@ export async function scanReceiptWithGemini(
   } catch (err: any) {
     clearTimeout(timeoutId);
     if (err?.name === 'AbortError') {
-      throw new Error('網路連線回應超時（超過 40 秒無回應）');
+      throw new Error('網路連線回應超時（超過 56 秒無回應）');
     }
     throw err;
   }
