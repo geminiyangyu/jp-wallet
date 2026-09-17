@@ -24,8 +24,9 @@ function devApiPlugin() {
     config(_config: any, { command, mode }: { command: string; mode: string }) {
       if (command !== 'serve') return
       const env = loadEnv(mode, process.cwd(), '') // 第三個參數留空字串 = 載入所有變數，不限前綴
-      if (env.GEMINI_API_KEY && !process.env.GEMINI_API_KEY) {
-        process.env.GEMINI_API_KEY = env.GEMINI_API_KEY
+      // 伺服器端會用到的變數都要轉進 process.env，否則本機行為會跟 Vercel 上不一致
+      for (const key of ['GEMINI_API_KEY', 'GEMINI_MODEL']) {
+        if (env[key] && !process.env[key]) process.env[key] = env[key]
       }
     },
 

@@ -54,12 +54,57 @@ const SYSTEM_PROMPT = `
 若圖片內容無法辨識清楚,總金額或店名請填 null,並在「信心程度」與「無法辨識原因」欄位說明原因,不要用其他收據的內容替代或猜測。
 `;
 
-// 模型名稱可用 Vercel 環境變數 GEMINI_MODEL 覆寫，未來 Google 汰換模型時
-// 只要在後台改一個變數即可，不必動程式碼重新部署。
-// 註：2026-09-17 起 Google 對 gemini-2.0-flash 回傳 404「no longer available」，
-//     故預設改為 gemini-3.8-flash。若該模型日後恢復，設 GEMINI_MODEL 即可切回。
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
-const SERVER_TIMEOUT_MS = 20000; // 伺服器端 20 秒，比前端的 25 秒短，讓前端一定收得到錯誤訊息
+/**
+ * 模型遞補清單（依序嘗試，第一個成功就回傳）。
+ *
+ * 為什麼需要清單而不是單一模型——2026-09-17 實測發現兩種故障：
+ *   1. gemini-2.0-flash 回傳 404「no longer available」，Google 已停止提供
+ *   2. gemini-3.8-flash（9/2 才發布）頻繁回傳 503「experiencing high demand」，
+ *      實測 5 次只成功 2 次，批次掃描會一直失敗
+ * 單押任何一個模型都不可靠，因此改為自動遞補：
+ * 遇到 404（模型消失）、503/500（過載）、429（限頻）就換下一個，使用者無感。
+ *
+ * 可用 Vercel 環境變數 GEMINI_MODEL 覆寫（逗號分隔，依優先順序）。
+ * 例：GEMINI_MODEL=gemini-3.8-flash,gemini-3.6-flash
+ */
+const MODEL_CHAIN: string[] = (
+  process.env.GEMINI_MODEL || 'gemini-3.6-flash,gemini-3.8-flash,gemini-3.5-flash'
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// 總預算 18 秒，比前端的 25 秒短，確保前端一定收得到伺服器的錯誤訊息而非自己逾時
+const TOTAL_BUDGET_MS = 18000;
+const PER_ATTEMPT_MS = 12000; // 單一模型最多等 12 秒
+const MIN_ATTEMPT_MS = 4000; // 剩餘時間不足 4 秒就不再嘗試下一個模型
+
+// 這些狀態碼代表「這個模型現在不能用」，換下一個還有機會成功。
+// 其他錯誤（400 圖片格式錯誤、403 金鑰無效）換模型也沒用，直接回報。
+const RETRYABLE = new Set([404, 429, 500, 502, 503, 504]);
+
+async function callGemini(
+  model: string,
+  apiKey: string,
+  requestBody: unknown,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+        signal: controller.signal,
+      }
+    );
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 // Vercel 免費方案單次函式最長可跑 60 秒，這裡設 30 秒已綽綽有餘
 export const config = {
@@ -122,46 +167,61 @@ export default async function handler(req: any, res: any) {
     },
   };
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), SERVER_TIMEOUT_MS);
+  const startedAt = Date.now();
+  const tried: string[] = [];
+  let lastStatus = 500;
+  let lastError = '未知錯誤';
 
-  try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
+  for (const model of MODEL_CHAIN) {
+    const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
+    if (remaining < MIN_ATTEMPT_MS) break; // 時間不夠了，別讓前端等到自己逾時
+
+    tried.push(model);
+
+    try {
+      const response = await callGemini(
+        model,
+        apiKey,
+        requestBody,
+        Math.min(remaining, PER_ATTEMPT_MS)
+      );
+
+      if (response.ok) {
+        const data: any = await response.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+        if (!text) {
+          lastStatus = 502;
+          lastError = `模型 ${model} 未回傳內容`;
+          continue; // 換下一個模型試試
+        }
+
+        // 只回傳 AI 產生的 JSON 字串，所有欄位對應與和曆換算仍由前端處理。
+        // 一併回傳 model 方便日後除錯：可以知道實際是哪個模型辨識的。
+        res.status(200).json({ text, model, tried });
+        return;
       }
-    );
-    clearTimeout(timeoutId);
 
-    if (!response.ok) {
       const errorData: any = await response.json().catch(() => ({}));
-      // 把 Google 的原始狀態碼原封不動往前端送，前端才能正確處理 429 限頻重試
-      res.status(response.status).json({
-        error: `Gemini API 錯誤: ${errorData?.error?.message || response.statusText}`,
-      });
-      return;
-    }
+      lastStatus = response.status;
+      lastError = errorData?.error?.message || response.statusText;
 
-    const data: any = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!text) {
-      res.status(502).json({ error: '無法從 AI 取得有效回應' });
-      return;
+      // 不是「換個模型就可能好」的錯誤，繼續試也是浪費時間，直接回報
+      if (!RETRYABLE.has(response.status)) break;
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        lastStatus = 504;
+        lastError = `模型 ${model} 回應逾時`;
+        continue; // 這個模型太慢，換下一個
+      }
+      lastStatus = 500;
+      lastError = err?.message || '伺服器端發生未預期錯誤';
+      break; // 網路層錯誤，換模型無濟於事
     }
-
-    // 只回傳 AI 產生的 JSON 字串，所有欄位對應與和曆換算仍由前端處理
-    res.status(200).json({ text });
-  } catch (err: any) {
-    clearTimeout(timeoutId);
-    if (err?.name === 'AbortError') {
-      res.status(504).json({ error: '辨識逾時（伺服器等待超過 20 秒）' });
-      return;
-    }
-    res.status(500).json({ error: err?.message || '伺服器端發生未預期錯誤' });
   }
+
+  res.status(lastStatus).json({
+    error: `Gemini API 錯誤: ${lastError}`,
+    tried, // 讓前端／除錯時看得出試過哪些模型
+  });
 }
