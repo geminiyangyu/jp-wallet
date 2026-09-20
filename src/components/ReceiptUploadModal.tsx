@@ -126,40 +126,54 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
   const [statusMessage, setStatusMessage] = useState<string>('');
   const shouldCancelRef = React.useRef(false);
 
-  // Image compressor for scan mode (Max 600px, 0.5 quality for lightning-fast mobile upload)
-  const compressImageToBase64 = (file: File): Promise<string> => {
+  /**
+   * 收據相片處理：產生「辨識用高解析」與「保存用縮圖」兩份。
+   *
+   * 【為什麼要改】2026-09-20 實測：舊版把最長邊壓到 600px，
+   * 一張 284x1326 的收據會變成 129x600——日期那一行糊成一片，
+   * 連人眼都認不出「2026」，AI 只能猜，所以同一張圖跑出 2020 / 2024，
+   * 店名也從「仙台アエル店」變成「取手店」。這不是解析邏輯的問題，是看不見。
+   *
+   * 收據又高又窄，用「最長邊」設限會把寬度壓爛，因此寬高分開設限。
+   * 辨識用高解析只在上傳當下用過即丟，存進資料庫的仍是小縮圖，
+   * 不影響 IndexedDB 容量。
+   */
+  const SCAN_MAX_WIDTH = 1200;   // 辨識用：足以讓 AI 讀清楚每一行
+  const SCAN_MAX_HEIGHT = 3200;  // 長收據也不過度壓縮
+  const SCAN_QUALITY = 0.75;
+  const THUMB_MAX = 400;         // 保存用縮圖：只是讓使用者辨認是哪張
+  const THUMB_QUALITY = 0.5;
+
+  const drawScaled = (img: HTMLImageElement, maxW: number, maxH: number, quality: number): string => {
+    // 只縮小不放大
+    const scale = Math.min(1, maxW / img.width, maxH / img.height);
+    const width = Math.max(1, Math.round(img.width * scale));
+    const height = Math.max(1, Math.round(img.height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, width, height);
+    return canvas.toDataURL('image/jpeg', quality);
+  };
+
+  const compressImageToBase64 = (file: File): Promise<{ scan: string; thumb: string }> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = (e) => {
         const img = new Image();
         img.onload = () => {
-          const canvas = document.createElement('canvas');
-          const MAX_WIDTH = 600;
-          const MAX_HEIGHT = 600;
-          let width = img.width;
-          let height = img.height;
-
-          if (width > height) {
-            if (width > MAX_WIDTH) {
-              height = Math.round((height * MAX_WIDTH) / width);
-              width = MAX_WIDTH;
-            }
-          } else {
-            if (height > MAX_HEIGHT) {
-              width = Math.round((width * MAX_HEIGHT) / height);
-              height = MAX_HEIGHT;
-            }
-          }
-
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            resolve(e.target?.result as string);
+          const scan = drawScaled(img, SCAN_MAX_WIDTH, SCAN_MAX_HEIGHT, SCAN_QUALITY);
+          const thumb = drawScaled(img, THUMB_MAX, THUMB_MAX, THUMB_QUALITY);
+          if (!scan) {
+            const raw = e.target?.result as string;
+            resolve({ scan: raw, thumb: raw });
             return;
           }
-          ctx.drawImage(img, 0, 0, width, height);
-          resolve(canvas.toDataURL('image/jpeg', 0.5)); 
+          resolve({ scan, thumb: thumb || scan });
         };
         img.onerror = () => reject(new Error('圖片讀取失敗'));
         img.src = e.target?.result as string;
@@ -196,19 +210,19 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
           const file = files[i];
 
           try {
-            const base64 = await compressImageToBase64(file);
+            const { scan, thumb } = await compressImageToBase64(file);
             if (shouldCancelRef.current) return;
 
             let result;
             try {
-              result = await scanReceiptWithGemini(base64, 'image/jpeg');
+              result = await scanReceiptWithGemini(scan, 'image/jpeg');
             } catch (firstErr: any) {
               const msg = firstErr?.message || '';
               if (msg.includes('quota') || msg.includes('Quota') || msg.includes('429') || msg.includes('exceeded')) {
                 setStatusMessage(`頻率過高，自動冷卻中...`);
                 await new Promise(resolve => setTimeout(resolve, 3000));
                 if (shouldCancelRef.current) return;
-                result = await scanReceiptWithGemini(base64, 'image/jpeg');
+                result = await scanReceiptWithGemini(scan, 'image/jpeg');
               } else {
                 throw firstErr;
               }
@@ -229,7 +243,7 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
               taxJpy: result.taxJpy || 0,
               discountJpy: 0,
               totalJpy: result.totalJpy || 0,
-              imageUrl: base64,
+              imageUrl: thumb,
               createdAt: Date.now() + i,
             };
           } catch (err: any) {

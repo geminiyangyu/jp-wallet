@@ -22,6 +22,8 @@ export function App() {
   const [activeTripId, setActiveTripId] = useState<string>('');
 
   const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null);
+  // 待確認刪除的發票 id（改用 App 內建確認視窗，不用 window.confirm）
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
 
   // Load state from IndexedDB (or LocalStorage fallback) on mount
@@ -154,14 +156,26 @@ export function App() {
     setSelectedReceipt(updatedRcpt);
   };
 
+  /**
+   * 刪除發票。
+   *
+   * 【為什麼不用 window.confirm】瀏覽器只要出現過「防止此頁面建立其他對話方塊」
+   * 的勾選（連續跳幾次對話框後就會出現），之後 window.confirm() 會直接回傳 false，
+   * 使用者按了刪除卻毫無反應。iOS 的獨立 PWA 模式也有類似狀況。
+   * 改用 App 自己的確認視窗，行為不受瀏覽器設定影響。
+   */
   const handleDeleteReceipt = (receiptId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (window.confirm('確定要刪除這張發票記帳嗎？')) {
-      updateActiveTripReceipts(receipts.filter(r => r.id !== receiptId));
-      if (selectedReceipt?.id === receiptId) {
-        setSelectedReceipt(null);
-      }
+    setPendingDeleteId(receiptId);
+  };
+
+  const confirmDeleteReceipt = () => {
+    if (!pendingDeleteId) return;
+    updateActiveTripReceipts(receipts.filter(r => r.id !== pendingDeleteId));
+    if (selectedReceipt?.id === pendingDeleteId) {
+      setSelectedReceipt(null);
     }
+    setPendingDeleteId(null);
   };
 
   if (!activeTrip) return null;
@@ -212,6 +226,37 @@ export function App() {
           onClose={() => setSelectedReceipt(null)}
           onUpdateReceipt={handleUpdateReceipt}
         />
+      )}
+
+      {pendingDeleteId && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 px-6 animate-fadeIn"
+          onClick={() => setPendingDeleteId(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-bold text-gray-900">刪除這張發票？</h3>
+            <p className="mt-2 text-sm text-gray-500">刪除後無法復原。</p>
+            <div className="mt-6 flex gap-3">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteId(null)}
+                className="flex-1 rounded-xl border border-gray-200 py-2.5 text-sm font-semibold text-gray-600 hover:bg-gray-50 active:scale-[0.98] transition"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteReceipt}
+                className="flex-1 rounded-xl bg-red-500 py-2.5 text-sm font-semibold text-white hover:bg-red-600 active:scale-[0.98] transition"
+              >
+                確定刪除
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {isUploadOpen && (
