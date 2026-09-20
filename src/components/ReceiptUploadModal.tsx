@@ -177,83 +177,91 @@ export const ReceiptUploadModal: React.FC<ReceiptUploadModalProps> = ({
       shouldCancelRef.current = false;
       setProgress({ current: 0, total: files.length });
 
-      const newReceipts: Receipt[] = [];
+      // 同時處理多張相片，不再一張一張排隊。
+      // 舊版是循序執行、每張之間還等 800ms，10 張就要兩分鐘；
+      // 併發 3 張後約縮短為三分之一。數字不宜再調高，以免觸發 Google 的頻率限制。
+      const CONCURRENCY = 3;
+
+      // 用索引對位存放，確保最後加入的順序與使用者選取相片的順序一致
+      const slots: (Receipt | null)[] = new Array(files.length).fill(null);
       let hasError = false;
+      let completed = 0;
+      let cursor = 0;
 
-      for (let i = 0; i < files.length; i++) {
-        if (shouldCancelRef.current) break;
+      const worker = async (): Promise<void> => {
+        while (true) {
+          const i = cursor++;
+          if (i >= files.length || shouldCancelRef.current) return;
 
-        const file = files[i];
-        setProgress({ current: i + 1, total: files.length });
-        setStatusMessage(`正在辨識第 ${i + 1} / ${files.length} 張（${file.name}）...`);
+          const file = files[i];
 
-        if (i > 0) {
-          await new Promise(resolve => setTimeout(resolve, 800));
-        }
-        
-        try {
-          const base64 = await compressImageToBase64(file);
-          if (shouldCancelRef.current) break;
-          
-          let result;
           try {
-            result = await scanReceiptWithGemini(base64, 'image/jpeg');
-          } catch (firstErr: any) {
-            const msg = firstErr?.message || '';
-            if (msg.includes('quota') || msg.includes('Quota') || msg.includes('429') || msg.includes('exceeded')) {
-              setStatusMessage(`頻率過高，自動冷卻中 (${i + 1}/${files.length})...`);
-              await new Promise(resolve => setTimeout(resolve, 3000));
-              if (shouldCancelRef.current) break;
-              result = await scanReceiptWithGemini(base64, 'image/jpeg');
-            } else {
-              throw firstErr;
-            }
-          }
-          
-          newReceipts.push({
-            id: `rcpt-${Date.now()}-${i}`,
-            storeNameJp: result.storeNameJp || '不明店家',
-            storeNameZh: result.storeNameZh || '未知名店家',
-            branchName: '',
-            address: '',
-            country: 'Japan',
-            date: result.date || new Date().toLocaleString('zh-TW'),
-            category: result.category || '其他',
-            items: result.items || [],
-            itemCount: result.items?.length || 1,
-            subtotalJpy: (result.totalJpy || 0) - (result.taxJpy || 0),
-            taxJpy: result.taxJpy || 0,
-            discountJpy: 0,
-            totalJpy: result.totalJpy || 0,
-            imageUrl: base64, 
-            createdAt: Date.now() + i,
-          });
-        } catch (err: any) {
-          console.error(err);
-          hasError = true;
-          
-          let reason = '辨識失敗';
-          const rawMsg = err?.message || '';
-          if (rawMsg.includes('超時') || rawMsg.includes('timeout')) {
-            reason = '網路連線超時';
-          } else if (rawMsg.includes('quota') || rawMsg.includes('Quota') || rawMsg.includes('exceeded') || rawMsg.includes('429')) {
-            reason = '超過 API 額度限制';
-          } else if (rawMsg.includes('API Key')) {
-            reason = 'API Key 設定錯誤';
-          } else if (rawMsg.includes('fetch') || rawMsg.includes('network')) {
-            reason = '網路連線失敗';
-          }
+            const base64 = await compressImageToBase64(file);
+            if (shouldCancelRef.current) return;
 
-          setFailedErrors(prev => [
-            ...prev,
-            {
-              index: i + 1,
-              fileName: file.name,
-              reason,
+            let result;
+            try {
+              result = await scanReceiptWithGemini(base64, 'image/jpeg');
+            } catch (firstErr: any) {
+              const msg = firstErr?.message || '';
+              if (msg.includes('quota') || msg.includes('Quota') || msg.includes('429') || msg.includes('exceeded')) {
+                setStatusMessage(`頻率過高，自動冷卻中...`);
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                if (shouldCancelRef.current) return;
+                result = await scanReceiptWithGemini(base64, 'image/jpeg');
+              } else {
+                throw firstErr;
+              }
             }
-          ]);
+
+            slots[i] = {
+              id: `rcpt-${Date.now()}-${i}`,
+              storeNameJp: result.storeNameJp || '不明店家',
+              storeNameZh: result.storeNameZh || '未知名店家',
+              branchName: '',
+              address: '',
+              country: 'Japan',
+              date: result.date || new Date().toLocaleString('zh-TW'),
+              category: result.category || '其他',
+              items: result.items || [],
+              itemCount: result.items?.length || 1,
+              subtotalJpy: (result.totalJpy || 0) - (result.taxJpy || 0),
+              taxJpy: result.taxJpy || 0,
+              discountJpy: 0,
+              totalJpy: result.totalJpy || 0,
+              imageUrl: base64,
+              createdAt: Date.now() + i,
+            };
+          } catch (err: any) {
+            console.error(err);
+            hasError = true;
+
+            let reason = '辨識失敗';
+            const rawMsg = err?.message || '';
+            if (rawMsg.includes('超時') || rawMsg.includes('timeout')) {
+              reason = '網路連線超時';
+            } else if (rawMsg.includes('quota') || rawMsg.includes('Quota') || rawMsg.includes('exceeded') || rawMsg.includes('429')) {
+              reason = '超過 API 額度限制';
+            } else if (rawMsg.includes('API Key')) {
+              reason = 'API Key 設定錯誤';
+            } else if (rawMsg.includes('fetch') || rawMsg.includes('network')) {
+              reason = '網路連線失敗';
+            }
+
+            setFailedErrors(prev => [...prev, { index: i + 1, fileName: file.name, reason }]);
+          } finally {
+            completed += 1;
+            setProgress({ current: completed, total: files.length });
+            setStatusMessage(`辨識中... 已完成 ${completed} / ${files.length} 張`);
+          }
         }
-      }
+      };
+
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, files.length) }, () => worker())
+      );
+
+      const newReceipts: Receipt[] = slots.filter((r): r is Receipt => r !== null);
 
       if (newReceipts.length > 0) {
         onAddReceipt(newReceipts);

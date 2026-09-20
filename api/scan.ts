@@ -68,7 +68,10 @@ const SYSTEM_PROMPT = `
  * 例：GEMINI_MODEL=gemini-3.6-flash
  */
 const MODEL_CHAIN: string[] = (
-  process.env.GEMINI_MODEL || 'gemini-3.6-flash,gemini-3.8-flash,gemini-3.5-flash'
+  process.env.GEMINI_MODEL ||
+  // flash-lite 是 Google 目前最快的一檔，排最前面；
+  // 萬一它不支援圖片輸入，在並行競速下只是輸掉這一局，不影響其他模型，等於零風險。
+  'gemini-3.5-flash-lite,gemini-3.6-flash,gemini-3.8-flash,gemini-3.5-flash'
 )
   .split(',')
   .map((s) => s.trim())

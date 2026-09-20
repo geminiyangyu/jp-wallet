@@ -34,14 +34,23 @@ function normalizeJapaneseReceiptDate(rawDateStr: string | undefined): string {
     return `${year}年`;
   });
 
-  // Match standard YYYY年MM月DD日
-  const match = s.match(/(\d{4})[年/.\-](\d{1,2})[月/.\-](\d{1,2})/);
+  // 比對 YYYY年MM月DD日 / YYYY-MM-DD / YYYY.MM.DD
+  //
+  // 各家收據的排版差異很大，2026-09-20 用 9 張實際收據測出兩個會漏掉的寫法：
+  //   1.「2026年 7月12日」——「年」和月份之間有空格（善治郎、3COINS）
+  //   2.「19時22分」——用時／分而非冒號表示時間（善治郎）
+  // 因此分隔符號前後都允許空白，時間也同時接受「:」與「時」。
+  const match = s.match(/(\d{4})\s*[年/.\-]\s*(\d{1,2})\s*[月/.\-]\s*(\d{1,2})/);
   if (match) {
     const year = match[1];
     const month = String(parseInt(match[2], 10)).padStart(2, '0');
     const day = String(parseInt(match[3], 10)).padStart(2, '0');
-    const timeMatch = s.match(/\d{1,2}:\d{2}/);
-    const timeStr = timeMatch ? ` ${timeMatch[0]}` : '';
+
+    const timeMatch = s.match(/(\d{1,2})\s*[:：時]\s*(\d{2})/);
+    const timeStr = timeMatch
+      ? ` ${String(parseInt(timeMatch[1], 10)).padStart(2, '0')}:${timeMatch[2]}`
+      : '';
+
     return `${year}年${month}月${day}日${timeStr}`;
   }
 
