@@ -100,18 +100,28 @@ async function askModel(
   model: string,
   apiKey: string,
   requestBody: unknown,
+  fallbackBody: unknown,
   signal: AbortSignal,
   startedAt: number
 ): Promise<ScanWin> {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-    {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const post = (payload: unknown) =>
+    fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify(payload),
       signal,
+    });
+
+  let response = await post(requestBody);
+
+  // 若這個模型不接受 thinkingConfig（400），改用不含該欄位的請求重試一次
+  if (response.status === 400) {
+    const probe: any = await response.clone().json().catch(() => ({}));
+    if (String(probe?.error?.message || '').toLowerCase().includes('thinking')) {
+      response = await post(fallbackBody);
     }
-  );
+  }
 
   if (!response.ok) {
     const errorData: any = await response.json().catch(() => ({}));
@@ -192,6 +202,32 @@ export default async function handler(req: any, res: any) {
     generationConfig: {
       responseMimeType: 'application/json',
       temperature: 0.1, // 低溫度，事實抽取不需要創意
+
+      /**
+       * 【這是長收據會逾時的真正原因】
+       *
+       * Gemini 3.x 的 Flash 模型預設開啟「思考模式」（thinkingLevel 預設 medium），
+       * 回答前會先在內部推理一輪。品項越多想得越久，19 品項的長收據因此動輒 30 秒以上。
+       *
+       * 舊的 gemini-2.0-flash 沒有這個機制，所以當年 0.8 秒就回來——
+       * 慢下來的不是我們的程式，是換模型後多了這段思考。
+       *
+       * 收據辨識是「照著念」的抽取工作，不需要推理，設成 low 可大幅降低延遲。
+       * 註：Gemini 3 Flash 無法完全關閉思考，low 已是最低檔。
+       */
+      thinkingConfig: {
+        thinkingLevel: 'low',
+      },
+    },
+  };
+
+  // 萬一某個模型不認得 thinkingConfig（回 400），用這份不含該欄位的請求重試一次，
+  // 確保不會因為一個相容性問題讓整個辨識功能掛掉。
+  const fallbackBody = {
+    ...requestBody,
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0.1,
     },
   };
 
@@ -202,7 +238,7 @@ export default async function handler(req: any, res: any) {
   const budgetTimer = setTimeout(() => controller.abort(), TOTAL_BUDGET_MS);
 
   const attempts = MODEL_CHAIN.map((model) =>
-    askModel(model, apiKey, requestBody, controller.signal, startedAt)
+    askModel(model, apiKey, requestBody, fallbackBody, controller.signal, startedAt)
   );
 
   try {
