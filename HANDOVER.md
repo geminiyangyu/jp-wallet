@@ -1,170 +1,288 @@
-# 📋 JP Wallet 專案交接文件 (HANDOVER.md)
+# 📋 JP Wallet 專案交接文件
 
-> **致接手的 AI Assistant / 開發者：**
-> 本文件包含 **JP Wallet** 專案的完整架構、核心邏輯、資料庫設計、效能防護機制、近期完成的重大優化與未來擴充方向。請在接手作業前詳細閱讀本文件。
-
----
-
-## 1. 📌 專案概覽 (Project Overview)
-- **專案名稱**: JP Wallet (`jp-wallet`)
-- **核心定位**: 專為赴日旅遊設計的單頁 Web 應用程式 (SPA)。支援日本發票/收據相片批次辨識 (Gemini 2.0 AI)、無發票手動記帳、多行程管理、日圓/台幣即時匯率換算、天數標籤篩選、分類明細統整與每日消費趨勢分析。
-- **iOS PWA 支援**: 支援在 iPhone Safari 點擊「新增至主畫面」作為無網址列的全螢幕獨立 App 使用（永久有效不失效）。
-- **技術棧 (Tech Stack)**:
-  - **前端框架**: React 19, TypeScript ~6.0
-  - **構建工具**: Vite 8
-  - **樣式庫**: Tailwind CSS v4, Lucide React Icons
-  - **AI 辨識**: Google Generative AI SDK (`gemini-2.0-flash`)
-  - **本地資料庫**: 原生 IndexedDB (`dbStorage.ts`) + LocalStorage 防崩潰備份
-  - **本地環境**: `.node_local` 內含 Node.js v20.18.0 & npm
+> 給接手的開發者或 AI：本文件描述**目前實際的**架構與設定。
+> 最後更新：2026-09-24。所有數值都是從程式碼實際抓出來的，不是憑印象寫的。
 
 ---
 
-## 2. 📂 專案目錄結構 (Directory Structure)
+## 0. 🚀 在新電腦上接手（先做這段）
+
+### 0.1 需要先裝的東西
+
+- **Node.js 20 以上**（Vite 8 的最低要求）
+- **Git**
+
+> 舊環境曾在專案內放 `.node_local`（內附 Node 20.18.0），該資料夾已被 `.gitignore` 排除、不會進版控。
+> 新電腦請直接安裝系統版 Node，**指令前面不需要再加 `PATH=$(pwd)/.node_local/bin:...` 前綴**。
+
+### 0.2 完整啟動步驟
+
+```bash
+git clone https://github.com/geminiyangyu/jp-wallet.git
+cd jp-wallet
+npm install
+```
+
+接著在專案根目錄建立 `.env`（這個檔案**不在 repo 裡**，必須自己建）：
+
+```
+GEMINI_API_KEY=你的_Gemini_金鑰
+```
+
+> ⚠️ **變數名稱沒有 `VITE_` 前綴，這一點很重要**，原因見第 3 節。
+> 金鑰可從 Google AI Studio（<https://aistudio.google.com/apikey>）取得。
+
+然後：
+
+```bash
+npm run dev      # 開發伺服器，/api/scan 由 vite.config.ts 的中介層代理
+npm run build    # 正式建置（內含 tsc -b 型別檢查）
+npm run lint     # oxlint
+```
+
+### 0.3 不在 repo 裡、需要自備的三樣東西
+
+| 項目 | 說明 |
+|---|---|
+| `.env` | Gemini 金鑰。刻意排除，避免金鑰外流 |
+| `.node_local` | 舊的內附 Node 執行環境。新電腦改用系統 Node |
+| `node_modules` | `npm install` 會重建 |
+
+### 0.4 GitHub 推送權限
+
+GitHub 已不接受密碼認證。新電腦第一次 `git push` 時：
+
+- **Username**：`geminiyangyu`
+- **Password**：貼 **Personal Access Token**（<https://github.com/settings/tokens/new>，勾選 `repo` scope）
+
+或改用 `gh auth login`（需先安裝 GitHub CLI）比較省事。
+建議先設 `git config --global credential.helper osxkeychain`（macOS）讓系統記住。
+
+---
+
+## 1. 📌 專案概覽
+
+- **名稱**：JP Wallet (`jp-wallet`)
+- **定位**：赴日旅遊記帳 SPA。日文收據 AI 辨識、無發票手動記帳、多行程管理、日圓/台幣換算、分類統計與消費趨勢分析。
+- **線上網址**：<https://jp-wallet.vercel.app>
+- **GitHub**：<https://github.com/geminiyangyu/jp-wallet>（分支 `main`）
+- **iOS PWA**：Safari「加入主畫面」後為無網址列的全螢幕 App。
+
+### 技術棧
+
+| 類別 | 使用 |
+|---|---|
+| 前端 | React 19 + TypeScript ~6.0 |
+| 建置 | Vite 8 |
+| 樣式 | Tailwind CSS v4、Lucide Icons |
+| AI 辨識 | Gemini（**由伺服器端 Serverless Function 呼叫**，見第 3 節） |
+| 本地資料庫 | 原生 IndexedDB + LocalStorage 降級備份 |
+| 部署 | Vercel（接 GitHub 自動部署） |
+
+**執行階段依賴只有 6 個**：`react`、`react-dom`、`lucide-react`、`clsx`、`tailwind-merge`、`canvas-confetti`。
+
+> 註：`@google/generative-ai` 與 `tesseract.js` 已於 2026-09 移除——兩者從未被任何原始碼 import，
+> 移除前後打包產物的雜湊完全相同，確認是死依賴。
+
+---
+
+## 2. 📂 目錄結構
 
 ```
 jp wallet/
-├── .env.example              # API Key 環境變數範例 (VITE_GEMINI_API_KEY)
-├── index.html                # PWA 全螢幕 Meta 標籤、Viewport 視口設定
-├── package.json              # 專案依賴與腳本 (已移除 Mac 專用封包以適應 Linux)
-├── vite.config.ts            # Vite 配置檔
-├── vercel.json               # Vercel SPA 路由重定向配置 ({ "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }] })
-├── HANDOVER.md               # 本交接文件
-├── public/
-│   ├── favicon.svg           # 翡翠綠 (Emerald) 日圓錢包高解析度 SVG 圖示 (兼 Apple Touch Icon)
-│   └── manifest.json         # PWA Standalone 全螢幕設定檔
+├── api/
+│   └── scan.ts               # ⭐ Vercel Serverless Function：伺服器端呼叫 Gemini
 ├── src/
-│   ├── main.tsx              # React 應用入口
-│   ├── App.tsx               # 主應用元件 (Tab 切換、行程管理、IndexedDB 資料庫持久化)
-│   ├── index.css             # TailwindCSS + 自訂動畫 (fadeIn, slideUp, scanLine, scrollbar-none)
-│   ├── types/
-│   │   └── receipt.ts        # 核心 Data Models (Receipt, ReceiptItem, Trip, CategoryType, CATEGORY_METAS)
+│   ├── App.tsx               # 主元件：行程管理、IndexedDB 持久化、刪除確認視窗
+│   ├── main.tsx
+│   ├── index.css
+│   ├── types/receipt.ts      # Receipt / ReceiptItem / Trip / CATEGORY_METAS
 │   ├── utils/
-│   │   ├── currency.ts       # JPY <-> TWD 匯率換算與格式化 (calcTWD, formatJPY, formatTWD)
-│   │   ├── dbStorage.ts      # IndexedDB 無限容量資料庫 + LocalStorage 備份與 QuotaExceeded 防爆保護
-│   │   ├── geminiScanner.ts  # Gemini 2.0 Flash 發票辨識 + 25s 超時防護 (AbortController) + 和曆計算
-│   │   └── ocrParser.ts      # 備用本地 OCR 解析器 + 日文商品字典 + INITIAL_SAMPLE_RECEIPTS
+│   │   ├── currency.ts       # JPY ↔ TWD 換算與格式化
+│   │   ├── dbStorage.ts      # IndexedDB + LocalStorage 防爆備份
+│   │   ├── geminiScanner.ts  # ⭐ 前端：POST /api/scan、和曆換算、欄位對應
+│   │   └── ocrParser.ts      # 備用本地 OCR 解析器（目前未啟用）
 │   └── components/
-│       ├── HeaderNav.tsx          # 頂部導覽列 (行程切換/新增/重命名/刪除、匯率設定、三分頁 Tab)
-│       ├── ReceiptList.tsx        # 【明細】分頁：頂部與右下角＋新增記帳按鈕、天數選擇列、useMemo/useCallback 效能管線
-│       ├── ReceiptDetailModal.tsx # 【發票詳情/編輯】彈窗 (檢視/編輯/取消/保存嚴格 UI 狀態 + twdTotal 即時連動)
-│       ├── ReceiptUploadModal.tsx # 【發票新增】彈窗 (📷 AI 相片極速掃描 / ✏️ 無發票手動記帳 雙模式 Tab)
-│       ├── CategoryView.tsx       # 【分類】分頁 (跨發票品項分類統計與展開)
-│       └── AnalyticsView.tsx      # 【分析】分頁 (總覽卡片 + 每日消費趨勢純 CSS 柱狀圖 + 分類進度條)
+│       ├── HeaderNav.tsx
+│       ├── ReceiptList.tsx
+│       ├── ReceiptDetailModal.tsx
+│       ├── ReceiptUploadModal.tsx  # ⭐ 相片壓縮、批次併發掃描、手動記帳
+│       ├── CategoryView.tsx
+│       └── AnalyticsView.tsx
+├── vite.config.ts            # ⭐ 含開發用 /api/scan 中介層
+├── vercel.json               # SPA rewrite（已排除 /api）
+├── .env.example
+└── HANDOVER.md               # 本文件
 ```
 
 ---
 
-## 3. 🔑 核心模組與資料架構 (Core Data Models & Architecture)
+## 3. 🔐 金鑰架構（最重要的一段）
 
-### 3.1 核心 Data Models (`src/types/receipt.ts`)
-```typescript
-export interface ReceiptItem {
-  id: string;
-  nameJp: string;         // 日文商品名稱
-  nameZh: string;         // 繁體中文翻譯
-  category: CategoryType; // 8大分類之一
-  quantity: number;       // 數量
-  unitPriceJpy: number;   // 單價 (JPY)
-  totalJpy: number;       // 該項總價 (JPY)
-}
+### 演進
 
-export interface Receipt {
-  id: string;
-  storeNameJp: string;    // 店家日文名
-  storeNameZh: string;    // 店家繁中名
-  branchName?: string;
-  address?: string;
-  country: string;
-  date: string;           // 格式：YYYY年MM月DD日 HH:mm
-  category: CategoryType; // 主要分類
-  items: ReceiptItem[];   // 細項列表
-  itemCount: number;
-  subtotalJpy: number;
-  taxJpy: number;
-  discountJpy: number;
-  totalJpy: number;       // 發票總金額 (JPY)
-  imageUrl?: string;      // 600px 高倍率壓縮相片 Base64 (手動記帳時為空字串)
-  createdAt: number;
-}
+**舊版（已廢除）**：前端直接讀 `import.meta.env.VITE_GEMINI_API_KEY` 呼叫 Gemini。
+Vite 會把 `VITE_` 開頭的變數在**建置時寫死進前端 JS**，等於把金鑰公開在網路上，任何人按 F12 都能抄走。
 
-export interface Trip {
-  id: string;
-  name: string;           // 行程名稱 (例：東京賞櫻之旅)
-  createdAt: number;
-  receipts: Receipt[];    // 該行程所屬的所有發票
-}
+**現版**：前端 `POST /api/scan` → 由 Vercel Serverless Function 持有金鑰代為呼叫 Gemini。
+金鑰只存在伺服器端環境變數，永遠不會進入 bundle。
+
+### 環境變數
+
+| 變數 | 位置 | 必填 | 說明 |
+|---|---|---|---|
+| `GEMINI_API_KEY` | Vercel 後台 + 本機 `.env` | ✅ | **不可有 `VITE_` 前綴** |
+| `GEMINI_MODEL` | Vercel 後台（選填） | ❌ | 逗號分隔的模型清單，覆寫預設。只填一個 = 不並行 |
+
+**Vercel 設定位置**：專案 → Settings → Environment Variables，三個環境（Production / Preview / Development）都要勾。
+**環境變數改完必須重新部署才會生效。**
+
+### ⚠️ 兩個 Vercel 專案
+
+同一個 GitHub repo 目前被**兩個 Vercel 專案**部署：
+
+| 網域 | 狀態 |
+|---|---|
+| `jp-wallet.vercel.app` | ✅ **正式使用**，已設定 `GEMINI_API_KEY` |
+| `jp-wallet-phau.vercel.app` | ❌ 未設定金鑰，掃描必定失敗 |
+
+用錯網域會看到「伺服器尚未設定 GEMINI_API_KEY 環境變數」。建議擇日刪除 phau 那個專案。
+
+---
+
+## 4. 🧠 AI 辨識管線
+
+### 流程
+
+```
+使用者選相片
+  → ReceiptUploadModal 壓縮出兩份（辨識用高解析 + 保存用縮圖）
+  → 同時處理 3 張（CONCURRENCY = 3）
+  → geminiScanner.ts：POST /api/scan
+  → api/scan.ts：同時發給多個 Gemini 模型，誰先回來用誰
+  → 回傳 AI 產生的 JSON 字串
+  → geminiScanner.ts 做和曆換算與欄位對應
+  → 寫入 IndexedDB
 ```
 
-### 3.2 8 大消費分類與樣式定義
-`CATEGORIES`: `['藥品', '零食', '生活用品', '吃飯', '交通', '御守', '紀念品', '其他']`
-每個分類在 `CATEGORY_METAS` 中均定義了對應的色塊 Badge 背景 (`badgeBg`)、文字顏色 (`badgeText`)、邊框 (`border`) 與主題色 (`color`)。
+### 關鍵設定（皆為實測調校的結果）
+
+| 設定 | 值 | 檔案 |
+|---|---|---|
+| 模型清單 | `gemini-3.5-flash-lite, gemini-3.6-flash, gemini-3.8-flash, gemini-3.5-flash` | `api/scan.ts` |
+| 呼叫方式 | **並行競速**（`Promise.any`），首個成功者勝出，其餘中止 | `api/scan.ts` |
+| 思考模式 | `thinkingConfig.thinkingLevel = 'low'` | `api/scan.ts` |
+| 伺服器總預算 | 50 秒 | `api/scan.ts` |
+| Vercel 函式上限 | 60 秒（必須大於總預算） | `api/scan.ts` |
+| 前端逾時 | 56 秒（必須大於伺服器總預算） | `geminiScanner.ts` |
+| 辨識用圖片 | 寬 ≤ 1200、高 ≤ 3200、品質 0.75 | `ReceiptUploadModal.tsx` |
+| 保存用縮圖 | 最長邊 400、品質 0.5 | `ReceiptUploadModal.tsx` |
+| 批次併發數 | 3 | `ReceiptUploadModal.tsx` |
+
+> **逾時數字彼此有依存關係**：前端 56s > 伺服器 50s，且 Vercel 上限 60s > 伺服器 50s。
+> 改任何一個都要一起檢查，否則會出現「伺服器還在跑、前端先放棄」的假逾時。
+
+### API 回應格式
+
+成功：
+```json
+{ "text": "<AI 產生的 JSON 字串>", "model": "實際勝出的模型", "ms": 8342, "tried": ["..."] }
+```
+
+失敗：
+```json
+{ "error": "Gemini API 錯誤: ...", "tried": ["..."], "details": ["模型A: 原因", "模型B: 原因"] }
+```
+
+`model` / `ms` / `details` 是除錯用的，排查問題時很有用。
 
 ---
 
-## 4. ⚡ 近期完成的重大優化與 Bug 修正歷史
+## 5. 🐛 踩過的坑（別再踩一次）
 
-### 4.1 本地資料庫與記憶體防爆 (`src/utils/dbStorage.ts`)
-- **問題原委**: 過去全數保存在 `localStorage`，上傳 5~10 張照片後因 LocalStorage 的 5MB 硬性限制引發 `QuotaExceededError` 導致 React 白屏崩潰。
-- **修復方案**: 升級為原生 `IndexedDB` 資料庫，支援數 GB 容量。`saveTrips` 內建 `try-catch` 防護，若 LocalStorage 滿載會自動去相片化進行二次備份，絕不導致白屏。
+### 5.1 `gemini-2.0-flash` 已被 Google 移除
+回傳 404 `no longer available`。**不要把模型改回 2.0 系列。**
 
-### 4.2 AI 引擎升級與連線防卡死 (`src/utils/geminiScanner.ts`)
-- **模型升級**: 由 `gemini-flash-latest` 升級為 Google 最新 **`gemini-2.0-flash`**，單張 OCR 辨識速度提昇 3~5 倍（~0.8 秒）。
-- **25 秒超時防護**: 加上 `AbortController` 寬鬆 25 秒 Timeout 控制，避免在弱網/日本漫遊環境下無窮卡死。
-- **和曆轉換算法**: 忠實解析發票年份，包含令和 N 年 (`2018+N`) 與平成 N 年 (`1988+N`) 的西元轉換。
+### 5.2 Gemini 3.x 預設會「思考」
+3.x Flash 的 `thinkingLevel` 預設是 `medium`，回答前先內部推理，
+19 品項的長收據因此動輒 30 秒以上。設成 `'low'` 是長收據能用的關鍵。
 
-### 4.3 相片極速壓縮與批次控制 (`src/components/ReceiptUploadModal.tsx`)
-- **高倍率壓縮**: `compressImageToBase64` 壓縮至 max 600px 寬高、0.5 品質，圖片 Base64 體積從 ~400KB 大幅降至 **~20KB**（傳輸速度快 5 倍以上）。
-- **批次間隔與重試**: 批次處理照片之間加入 800ms 間隔；若遇 Google 429 限頻自動冷卻 3 秒後重試一次。
-- **實時狀態與中途取消**: 畫面上動態顯示「正在辨識第 X / Y 張 (檔名)...」，並配有【中途停止 / 取消】按鈕。
+### 5.3 圖片壓太小會讓 AI「用猜的」
+舊版把最長邊壓到 600px，一張 284×1326 的收據會變成 **129×600**——日期那行糊到人眼都認不出。
+症狀是**同一張圖每次辨識出不同結果**（年份 2020/2024、店名、品項數都會變）。
+收據又高又窄，**必須寬高分開設限**，不能用「最長邊」。
 
-### 4.4 雙模式發票新增 (`ReceiptUploadModal.tsx`)
-- **📷 AI 相片掃描 Tab**: 批次選取相片並自動 AI 解析。
-- **✏️ 無發票手動新增 Tab**: 適用於自動販賣機、路邊攤、神社御守等現金消費。支援填寫店家名稱（中/日）、分類選擇、日期時間、JPY 總額（即時顯示進位台幣 `≈ NT$ XXX`）與自由新增品項。
+### 5.4 `window.confirm` 會被瀏覽器靜默停用
+連續跳幾次對話框後，瀏覽器會出現「防止此頁面建立其他對話方塊」的勾選；
+一旦勾選，`confirm()` 直接回傳 false，使用者按刪除完全沒反應。
+**發票刪除已改用 App 內建確認視窗**（`App.tsx` 的 `pendingDeleteId`）。
+> 旅程刪除與清除資料仍在用 `window.confirm`，若遇到同樣症狀，比照辦理。
 
-### 4.5 頁面效能與 UX 優化 (`ReceiptList.tsx` & `ReceiptDetailModal.tsx`)
-- **頂部＋新增按鈕**: 搜尋列右側新增【＋ 新增記帳】按鈕，不需下滑即可直接點擊。
-- **ReceiptList useMemo 全鏈路**: `filteredReceipts` → `sortedReceipts` → `groups` → `displayedGroups` 皆包裝在 `useMemo` 中，避免無謂 re-render。
-- **ReceiptDetailModal twdTotal 即時連動**: 修正編輯模式下修改 JPY 金額時「折合台幣」未即時反應的 bug (改為引用 `editedReceipt.totalJpy`)。
-- **嚴格 UI 狀態**: 檢視模式（左上關閉/右上編輯/右下完成）與編輯模式（左上取消/右上保存/右下完成隱藏）規範清晰。
+### 5.5 日期解析的兩個漏網格式
+以 9 張實際收據測出來的：
+- `2026年 7月12日`——「年」後面有空格
+- `19時22分`——用時/分而非冒號
 
----
+`geminiScanner.ts` 的正則已允許分隔符號前後有空白，時間也接受 `:` `：` `時`。
+改這段之前先跑一輪多格式測試。
 
-## 5. 🌐 Vercel 部署與 PWA 免費發布配置
-
-### 5.1 Vercel 部署說明
-- 專案根目錄配有 `vercel.json`，已寫好 SPA 路由重定向。
-- `package.json` 中已移除 Mac 專用 Linux 相斥封包 (`@rolldown/binding-darwin-x64`)，可直接在 Vercel 平台上 100% 成功建置。
-- **環境變數設定**: 於 Vercel 後台將 `VITE_GEMINI_API_KEY` 設為個人的 Gemini API Key 即可。
-- **線上展示網址**: `https://jp-wallet.vercel.app`
-
-### 5.2 PWA 設定 (iPhone 新增至主畫面)
-- `index.html` 內含 `apple-mobile-web-app-capable: yes` 與 `viewport-fit=cover`。
-- `public/manifest.json` 與 `public/favicon.svg` 已就緒，安裝到手機桌面後將擁有獨立無網址列的全螢幕體驗。
+### 5.6 `vercel.json` 的 rewrite 會吃掉 API 路由
+原本是 `/(.*)`，會把 `/api/scan` 一起導向 `index.html`。
+現在是 `/((?!api/).*)`，**不要改回去**。
 
 ---
 
-## 6. 🚀 本地開發與驗證指令 (Development Commands)
+## 6. 🌐 部署
 
-> **重要注意事項**: 本地開發環境使用 `.node_local` 內含的 Node.js，所有命令必須加上 PATH 前綴：
+推到 `main` → Vercel 自動建置上線，約一到兩分鐘。
 
 ```bash
-# 1. 雙擊桌面腳本一鍵啟動（Mac 最快）
-/Users/yangchengyu/Desktop/啟動\ JP\ Wallet.command
-
-# 2. 啟動 Vite 開發伺服器
-PATH=$(pwd)/.node_local/bin:$(pwd)/node_modules/.bin:$PATH vite --host
-
-# 3. TypeScript 類型檢查
-PATH=$(pwd)/.node_local/bin:$(pwd)/node_modules/.bin:$PATH tsc -b
-
-# 4. 正式打包編譯
-PATH=$(pwd)/.node_local/bin:$(pwd)/node_modules/.bin:$PATH vite build
+git add -A
+git commit -m "說明這次改了什麼"
+git push
 ```
+
+`.gitignore` 已排除 `.env`、`api key.txt`、`*.key`、`*.pem`、`photo/`、`*.pdf`、`node_modules`、`dist`、`.node_local`。
+**務必用 git 指令推送，不要用 GitHub 網頁拖曳上傳**——網頁拖曳不套用 `.gitignore`，手滑就會把金鑰公開。
 
 ---
 
-## 7. 💡 給後續開發者的改進建議 (Future Roadmap)
+## 7. 💡 待辦與建議
 
-1. **動態行程授權碼 (Auth Code)**: 可在設定中新增「訪問密碼/行程授權碼」功能，防止 Vercel 網址外流時免費 API 額度被陌生人佔用。
-2. **CSV / JSON 一鍵匯出**: 新增一鍵導出 CSV/Excel 功能，方便使用者回國後進行旅費報帳或分享給同行者。
-3. **離線備用 OCR (Fallback OCR)**: 當網路完全斷線或 Gemini API 額度用盡時，可降級調用 `src/utils/ocrParser.ts` 進行本地文字比對與解析。
+1. **更換 Gemini 金鑰**（優先）：現用的金鑰在舊架構下曾被打包進前端 bundle 公開過一段時間。
+   換新金鑰只需改 Vercel 環境變數與本機 `.env`，程式碼不用動。
+2. **刪除多餘的 Vercel 專案**：`jp-wallet-phau` 沒設金鑰，只會造成混淆。
+3. **UI 顯示真實錯誤訊息**：目前批次掃描失敗只顯示「辨識失敗」，
+   伺服器其實回傳了 `error` 與 `details`，把它顯示出來可大幅減少除錯往返。
+4. **CSV / JSON 匯出**：方便回國後報帳或分享給同行者。
+5. **離線備援 OCR**：`src/utils/ocrParser.ts` 已存在但未啟用，可在斷線或額度用盡時降級使用。
+6. **旅程授權碼**：防止 Vercel 網址外流時，免費 API 額度被陌生人消耗。
+
+---
+
+## 8. 🔍 排查速查表
+
+| 症狀 | 先查這裡 |
+|---|---|
+| 「伺服器尚未設定 GEMINI_API_KEY」 | Vercel 環境變數名稱是否正確、是否重新部署過、是不是開到 phau 網域 |
+| 所有掃描都失敗 | 用瀏覽器 console 打 `/api/scan`，看回傳的 `details` 逐模型原因 |
+| 長收據逾時、短的正常 | `thinkingLevel` 是否仍為 `low`；三個逾時數字的依存關係是否被破壞 |
+| 同一張圖每次結果不同 | 圖片壓縮尺寸太小（見 5.3） |
+| 年份/金額錯誤 | 同上，優先檢查解析度而非解析邏輯 |
+| 按刪除沒反應 | 是否有程式碼改回 `window.confirm`（見 5.4） |
+| 手機看到舊版行為 | iOS 快取。用無痕視窗驗證，或清除網站資料後重新加入主畫面 |
+
+### 直接從瀏覽器測 API（排查神器）
+
+在網站頁面的 console 執行：
+
+```js
+const r = await fetch('/api/scan', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ base64Data: '<純 base64，不含 data: 前綴>', mimeType: 'image/jpeg' })
+});
+console.log(r.status, await r.text());
+```
+
+回應會告訴你哪個模型勝出、花多久、或每個模型各自失敗的原因。
